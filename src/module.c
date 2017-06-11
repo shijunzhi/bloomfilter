@@ -1,58 +1,93 @@
+#include <stdio.h>
+#include <stdbool.h>
+
 #include "redismodule.h"
 
 #include "error.h"
 #include "bloomfilter.h"
-#include "list.h"
 
-#define OK_STR "OK"
+#define BLOOMFILTER_ENCODING_VERSION 1
 
-const char *g_err_str[] = {
-    "dumy",
+static const char *g_err_str[] = {
+    "OK",
     "not enough memory",
     "incorrect param type",
     "key already exist",
     "key not exist"
 };
 
+static RedisModuleType *g_bloomfilter_type;
+
+bool is_key_exist(RedisModuleCtx *ctx, RedisModuleString *str)
+{
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, str, REDISMODULE_READ);
+    if (key != NULL) {
+        RedisModule_CloseKey(key);
+        return true;
+    }
+    RedisModule_CloseKey(key);
+    return false;
+}
+
+bool is_same_type_key_exist(RedisModuleCtx *ctx, RedisModuleString *key_name)
+{
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, key_name, REDISMODULE_READ);
+    if (key == NULL) {
+        printf("key not exist\n");
+        return false;
+    }
+    int type = RedisModule_KeyType(key);
+    if (type != REDISMODULE_KEYTYPE_MODULE) {
+        RedisModule_CloseKey(key);
+        return false;
+    } else {
+        if (RedisModule_ModuleTypeGetType(key) != g_bloomfilter_type) {
+            RedisModule_CloseKey(key);
+            return false;
+        }
+    }
+    RedisModule_CloseKey(key);
+    return true;
+}
+
 int bloomfilter_create(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
 {
     if (argc != 4) {
         return RedisModule_WrongArity(ctx);
     }
+    if (is_key_exist(ctx, argv[1])) {
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_KEY_ALREADY_EXIST]);
+        return REDISMODULE_ERR;
+    }
 
-    const char *name;
-    size_t len;
     long long elem_count;
     double err_rate;
-    int res;
-    name = RedisModule_StringPtrLen(argv[1], &len);
     if (RedisModule_StringToLongLong(argv[2], &elem_count) != REDISMODULE_OK) {
-        RedisModule_ReplyWithError(ctx, g_err_str[ERR_PARAM_TYPE]);
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_WRONG_PARAM_TYPE]);
         return REDISMODULE_ERR;
     }
     if (RedisModule_StringToDouble(argv[3], &err_rate) != REDISMODULE_OK) {
-        RedisModule_ReplyWithError(ctx, g_err_str[ERR_PARAM_TYPE]);
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_WRONG_PARAM_TYPE]);
         return REDISMODULE_ERR;
     }
 
-    if (list_find(name, len) != NULL) {
-        RedisModule_ReplyWithError(ctx, g_err_str[ERR_ALREADY_EXIST]);
-        return REDISMODULE_ERR;
-    }
-
+    RedisModuleKey *key;
     bloomfilter *filter = filter_create(elem_count, err_rate);
     if (filter == NULL) {
         RedisModule_ReplyWithError(ctx, g_err_str[ERR_OOM]);
         return REDISMODULE_ERR;
     }
-    res = list_add_node(name, len, filter);
-    if (res != SUCCESS) {
+    key = RedisModule_OpenKey(ctx, argv[1], REDISMODULE_WRITE);
+    if (key == NULL) {
         filter_destroy(filter);
-        RedisModule_ReplyWithError(ctx, g_err_str[res]);
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_OOM]);
         return REDISMODULE_ERR;
     }
 
-    RedisModule_ReplyWithSimpleString(ctx, OK_STR);
+    RedisModule_ModuleTypeSetValue(key, g_bloomfilter_type, filter);
+    RedisModule_CloseKey(key);
+
+    RedisModule_ReplyWithSimpleString(ctx, g_err_str[SUCCESS]);
     return REDISMODULE_OK;
 }
 
@@ -61,18 +96,18 @@ int bloomfilter_add(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     if (argc < 3) {
         return RedisModule_WrongArity(ctx);
     }
-
-    const char *name;
-    size_t len;
-    name = RedisModule_StringPtrLen(argv[1], &len);
-
-    int added_count;
-    bloomfilter *filter = list_find(name, len);
-    if (filter == NULL) {
-        RedisModule_ReplyWithError(ctx, g_err_str[ERR_NOT_EXIST]);
+    if (!is_same_type_key_exist(ctx, argv[1])) {
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_KEY_NOT_EXIST]);
         return REDISMODULE_ERR;
     }
+
+    bloomfilter *filter;
+    int added_count;
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, argv[1], REDISMODULE_WRITE);
+    filter = (bloomfilter *)RedisModule_ModuleTypeGetValue(key);
+
     added_count = filter_add(filter, &argv[2], argc - 2);
+    RedisModule_CloseKey(key);
     RedisModule_ReplyWithLongLong(ctx, added_count);
     return REDISMODULE_OK;
 }
@@ -82,45 +117,46 @@ int bloomfilter_check(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     if (argc != 3) {
         return RedisModule_WrongArity(ctx);
     }
-
-    const char *name;
-    size_t len;
-    name = RedisModule_StringPtrLen(argv[1], &len);
-
-    bloomfilter *filter = list_find(name, len);
-    if (filter == NULL) {
-        RedisModule_ReplyWithError(ctx, g_err_str[ERR_NOT_EXIST]);
+    if (!is_same_type_key_exist(ctx, argv[1])) {
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_KEY_NOT_EXIST]);
         return REDISMODULE_ERR;
     }
+
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, argv[1], REDISMODULE_WRITE);
+    bloomfilter *filter = (bloomfilter *)RedisModule_ModuleTypeGetValue(key);
     if (filter_check(filter, argv[2])) {
         RedisModule_ReplyWithLongLong(ctx, 1);
     } else {
         RedisModule_ReplyWithLongLong(ctx, 0);
     }
+    RedisModule_CloseKey(key);
     return REDISMODULE_OK;
 }
 
-int bloomfilter_destroy(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
+void bloomfilter_free(void *value)
 {
-    if (argc < 2) {
-        return RedisModule_WrongArity(ctx);
-    }
+    bloomfilter *filter = (bloomfilter *)value;
+    filter_destroy(filter);
+}
 
-    const char *name;
-    size_t len;
-    bloomfilter *filter;
-    int delete_count = 0;
-    for (int i = 1; i < argc; i++) {
-        name = RedisModule_StringPtrLen(argv[i], &len);
-        filter = list_delete_node(name, len);
-        if (filter == NULL) {
-            continue;
-        }
-        delete_count++;
-        filter_destroy(filter);
-    }
-    RedisModule_ReplyWithLongLong(ctx, delete_count);
-    return REDISMODULE_OK;
+void *bloomfilter_rdb_load(RedisModuleIO *rdb, int encver)
+{
+    (void)rdb;
+    (void)encver;
+    return NULL;
+}
+
+void bloomfilter_rdb_save(RedisModuleIO *rdb, void *value)
+{
+    (void)rdb;
+    (void)value;
+}
+
+void bloomfilter_aof_rewrite(RedisModuleIO *aof, RedisModuleString *key, void *value)
+{
+    (void)aof;
+    (void)key;
+    (void)value;
 }
 
 int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
@@ -130,6 +166,19 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
 
     if (RedisModule_Init(ctx, "bloomfilter", 1, REDISMODULE_APIVER_1)
             == REDISMODULE_ERR) {
+        return REDISMODULE_ERR;
+    }
+
+    RedisModuleTypeMethods tm = {
+        .version = REDISMODULE_TYPE_METHOD_VERSION,
+        .rdb_load = bloomfilter_rdb_load,
+        .rdb_save = bloomfilter_rdb_save,
+        .aof_rewrite = bloomfilter_aof_rewrite,
+        .free = bloomfilter_free
+    };
+    g_bloomfilter_type = RedisModule_CreateDataType(
+            ctx, "bloomfilt", BLOOMFILTER_ENCODING_VERSION, &tm);
+    if (g_bloomfilter_type == NULL) {
         return REDISMODULE_ERR;
     }
 
@@ -145,10 +194,6 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     if (RedisModule_CreateCommand(ctx, "bloomfilter.check",
             bloomfilter_check, "readonly allow-stale", 1, 1, 0)
             == REDISMODULE_ERR) {
-        return REDISMODULE_ERR;
-    }
-    if (RedisModule_CreateCommand(ctx, "bloomfilter.destroy",
-            bloomfilter_destroy, "write", 1, 1, 0) == REDISMODULE_ERR) {
         return REDISMODULE_ERR;
     }
     list_init();
