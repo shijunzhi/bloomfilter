@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "redismodule.h"
 
@@ -33,7 +34,6 @@ bool is_same_type_key_exist(RedisModuleCtx *ctx, RedisModuleString *key_name)
 {
     RedisModuleKey *key = RedisModule_OpenKey(ctx, key_name, REDISMODULE_READ);
     if (key == NULL) {
-        printf("key not exist\n");
         return false;
     }
     int type = RedisModule_KeyType(key);
@@ -141,15 +141,29 @@ void bloomfilter_free(void *value)
 
 void *bloomfilter_rdb_load(RedisModuleIO *rdb, int encver)
 {
-    (void)rdb;
-    (void)encver;
-    return NULL;
+    if (encver != BLOOMFILTER_ENCODING_VERSION) {
+        return NULL;
+    }
+
+    int hash_times = (int)RedisModule_LoadSigned(rdb);
+    long long size = (long long)RedisModule_LoadSigned(rdb);
+    bloomfilter *filter = (bloomfilter *)RedisModule_Calloc(
+            1, sizeof(bloomfilter) + size * sizeof(unsigned char));
+    if (filter == NULL) {
+        return NULL;
+    }
+    filter->hash_times = hash_times;
+    filter->size = size;
+    memcpy(filter->ptr, RedisModule_LoadStringBuffer(rdb, NULL), size);
+    return filter;
 }
 
 void bloomfilter_rdb_save(RedisModuleIO *rdb, void *value)
 {
-    (void)rdb;
-    (void)value;
+    bloomfilter *filter = (bloomfilter *)value;
+    RedisModule_SaveSigned(rdb, filter->hash_times);
+    RedisModule_SaveSigned(rdb, filter->size);
+    RedisModule_SaveStringBuffer(rdb, (char *)(filter->ptr), filter->size);
 }
 
 void bloomfilter_aof_rewrite(RedisModuleIO *aof, RedisModuleString *key, void *value)
@@ -196,7 +210,6 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
             == REDISMODULE_ERR) {
         return REDISMODULE_ERR;
     }
-    list_init();
     return REDISMODULE_OK;
 }
 
