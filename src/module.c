@@ -88,6 +88,9 @@ int bloomfilter_create(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     RedisModule_CloseKey(key);
 
     RedisModule_ReplyWithSimpleString(ctx, g_err_str[SUCCESS]);
+
+    RedisModule_Replicate(ctx, "bloomfilter.create", "sss", argv[1], argv[2],
+                          argv[3]);
     return REDISMODULE_OK;
 }
 
@@ -109,6 +112,9 @@ int bloomfilter_add(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     added_count = filter_add(filter, &argv[2], argc - 2);
     RedisModule_CloseKey(key);
     RedisModule_ReplyWithLongLong(ctx, added_count);
+
+    RedisModule_Replicate(ctx, "bloomfilter.add", "sv", argv[1], &argv[2],
+                          argc - 2);
     return REDISMODULE_OK;
 }
 
@@ -130,6 +136,48 @@ int bloomfilter_check(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
         RedisModule_ReplyWithLongLong(ctx, 0);
     }
     RedisModule_CloseKey(key);
+    return REDISMODULE_OK;
+}
+
+int bloomfilter_set(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
+{
+    if (argc != 5) {
+        return RedisModule_WrongArity(ctx);
+    }
+    if (is_key_exist(ctx, argv[1])) {
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_KEY_ALREADY_EXIST]);
+        return REDISMODULE_ERR;
+    }
+
+    long long hash_times;
+    long long size;
+    const char *ptr = RedisModule_StringPtrLen(argv[4], NULL);
+    if (RedisModule_StringToLongLong(argv[2], &hash_times) != REDISMODULE_OK) {
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_WRONG_PARAM_TYPE]);
+        return REDISMODULE_ERR;
+    }
+    if (RedisModule_StringToLongLong(argv[3], &size) != REDISMODULE_OK) {
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_WRONG_PARAM_TYPE]);
+        return REDISMODULE_ERR;
+    }
+
+    bloomfilter *filter = (bloomfilter *)RedisModule_Alloc(
+            sizeof(bloomfilter) + sizeof(unsigned char) * size);
+    if (filter == NULL) {
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_OOM]);
+        return REDISMODULE_ERR;
+    }
+    filter->hash_times = (int)hash_times;
+    filter->size = size;
+    memcpy(filter->ptr, ptr, size);
+
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, argv[1], REDISMODULE_WRITE);
+    if (key == NULL) {
+        filter_destroy(filter);
+        RedisModule_ReplyWithError(ctx, g_err_str[ERR_OOM]);
+        return REDISMODULE_ERR;
+    }
+    RedisModule_ModuleTypeSetValue(key, g_bloomfilter_type, filter);
     return REDISMODULE_OK;
 }
 
@@ -168,9 +216,9 @@ void bloomfilter_rdb_save(RedisModuleIO *rdb, void *value)
 
 void bloomfilter_aof_rewrite(RedisModuleIO *aof, RedisModuleString *key, void *value)
 {
-    (void)aof;
-    (void)key;
-    (void)value;
+    bloomfilter *filter = (bloomfilter *)value;
+    RedisModule_EmitAOF(aof, "bloomfilter.set", "sllb",
+            key, filter->hash_times, filter->size, filter->ptr, filter->size);
 }
 
 int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
@@ -207,6 +255,12 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     }
     if (RedisModule_CreateCommand(ctx, "bloomfilter.check",
             bloomfilter_check, "readonly allow-stale", 1, 1, 0)
+            == REDISMODULE_ERR) {
+        return REDISMODULE_ERR;
+    }
+    // internal command for AOF rewrite
+    if (RedisModule_CreateCommand(ctx, "bloomfilter.set",
+            bloomfilter_set, "write deny-oom fast", 1, 1, 0)
             == REDISMODULE_ERR) {
         return REDISMODULE_ERR;
     }
