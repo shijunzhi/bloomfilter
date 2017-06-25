@@ -1,32 +1,40 @@
 # The bloomfilter of redis module
 A redis module to extend redis to support bloomfilter.
 
-## Support commands
+## Support operations
 
-### bloomfilter.create
+### Create one bloomfilter
 
 ```
 bloomfilter.create <key name> <data set size> <error rate>
 ```
-Create a bloomfilter
 
-### bloomfilter.add
+### Add one or more data to filter
 
 ```
 bloomfilter.add <key name> <value1> ...
 ```
-Add one or more data in filter
 
-### bloomfilter.check
+### Check if given value is in data set
 
 ```
 bloomfilter.check <key name> <value>
 ```
-Check if given value is in data set
 
-### bloomfilter.destroy
+### Delete one or more bloomfilters
 
 ```
-bloomfilter.destroy <key name> ...
+del <key name>
 ```
-Delete one or more given bloomfilter
+
+## RDB
+
+Support RDB save and load from RDB file
+
+## AOF
+
+When AOF rewrite, one bloomfilter will be rewrite by one internal usage command **bloomfilter.set**.
+
+## Replication
+
+Support
